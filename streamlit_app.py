@@ -20,7 +20,6 @@ st.markdown("""
     .viewerBadge_container__1QSob {visibility: hidden;}
     </style>
 """, unsafe_allow_html=True)
-
 # ------------------ キャッシュ関数 ------------------
 @st.cache_data(ttl=600)
 def get_user_records(_worksheet):
@@ -206,23 +205,14 @@ else:
             st.metric(label="💰 利益 合計", value=f"{sum_profit:,} G")
 
     # ------------------ グラフ ------------------
-
-
         st.write(f"### 累積利益推移")
         df["月"] = df["日付"].dt.to_period("M").dt.to_timestamp()
-
-        # ✅ 年の選択肢を動的に抽出
         available_years = sorted(df["月"].dt.year.unique(), reverse=True)
         selected_year = st.selectbox("表示する年を選択", available_years)
-
-        # ✅ 選択された年のデータだけにフィルタ
         df_selected_year = df[df["月"].dt.year == selected_year]
-
-        # 月別集計 ＆ 累積
         monthly_profit = df_selected_year.groupby("月")["利益"].sum().reset_index()
         monthly_profit["累積利益"] = monthly_profit["利益"].cumsum()
 
-        # ✅ 描画
         line_chart = alt.Chart(monthly_profit).mark_line(point=True).encode(
             x=alt.X("月:T", title="月"),
             y=alt.Y("累積利益:Q", title="累積利益（G）"),
