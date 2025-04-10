@@ -1,2 +1,7 @@
 streamlit
+shillelagh
 pandas
+gspread
+gsheetsdb
+gspread_dataframe
+oauth2client

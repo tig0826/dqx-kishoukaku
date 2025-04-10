@@ -1,290 +1,222 @@
-from collections import defaultdict
-from pathlib import Path
-import sqlite3
-
-import streamlit as st
 import altair as alt
+import streamlit as st
 import pandas as pd
+from pytz import timezone
+import uuid
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
-
-# Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title="Inventory tracker",
-    page_icon=":shopping_bags:",  # This is an emoji shortcode. Could be a URL too.
+    page_title="輝晶核家計簿", 
+    page_icon="https://ドラクエ10.jp/pic5/kisyou3.jpg", 
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# ------------------ キャッシュ関数 ------------------
+@st.cache_data(ttl=600)
+def get_user_records(_worksheet):
+    return _worksheet.get_all_records()
+if "spreadsheet" not in st.session_state:
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
+    client = gspread.authorize(creds)
+    SPREADSHEET_NAME = "輝晶核家計簿"
+    spreadsheet = client.open(SPREADSHEET_NAME)
+    st.session_state["spreadsheet"] = spreadsheet
+else:
+    spreadsheet = st.session_state["spreadsheet"]
+
+# ------------------ ユーザー選択 or 新規作成 ------------------
+st.sidebar.header("ユーザー選択または新規作成")
+if "sheet_titles" not in st.session_state:
+    st.session_state["sheet_titles"] = [ws.title for ws in spreadsheet.worksheets() if ws.title != "全体データ"]
+selected_user = st.sidebar.selectbox("ユーザーを選択", ["新規作成"] + st.session_state["sheet_titles"])
+
+if selected_user == "新規作成":
+    new_user = st.sidebar.text_input("新しいユーザー名を入力")
+    if st.sidebar.button("ユーザー作成") and new_user:
+        spreadsheet.add_worksheet(title=new_user, rows="1000", cols="20")
+        sheet = spreadsheet.worksheet(new_user)
+        sheet.append_row(["日付", "欠片45", "欠片75", "核", "全滅回数", "原価", "売値", "利益", "料理の価格", "飯数", "ID"])
+        st.success(f"{new_user} を作成しました。")
+else:
+    worksheet = st.session_state.get("worksheet")
+    if worksheet is None or st.session_state.get("selected_user") != selected_user:
+        st.cache_data.clear()
+        worksheet = spreadsheet.worksheet(selected_user)
+        st.session_state["worksheet"] = worksheet
+        st.session_state["selected_user"] = selected_user
+        st.session_state["records"] = get_user_records(worksheet)
+        st.rerun()
 
 
-def connect_db():
-    """Connects to the sqlite database."""
+    st.header(f"{selected_user} の輝晶核家計簿")
+    # ------------------ 入力フォーム ------------------
+    date = st.date_input("日付", datetime.now(timezone("Asia/Tokyo")).date())
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: frag_45 = st.number_input("欠片45", min_value=0, step=1)
+    with col2: frag_75 = st.number_input("欠片75", min_value=0, step=1)
+    with col3: core = st.number_input("核", min_value=0, step=1)
+    with col4: wipes = st.number_input("全滅回数", min_value=0, step=1)
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: meal_cost = st.number_input("料理の価格(万G)", min_value=0.0, step=10.0)
+    with col2: meal_num = st.number_input("飯数", min_value=0, step=1)
+    with col3: cost = st.number_input("細胞の価格(万G)", min_value=0.0, step=1.0)
+    with col4: price = st.number_input("核の価格(万G)", min_value=0.0, step=100.0)
+    commission = 0.05
+    profit = price * (frag_45 * 45/99 + frag_75 * 75/99 + core) * (1 - commission)
+    profit -= cost * 30 * (frag_45 + frag_75 + core + wipes) / 4
+    profit -= meal_cost * (meal_num / 5)
+    profit = int(profit * 10000)
+    st.markdown(f"💰 **利益の見込み**: `{int(profit):,} G`")
 
-    DB_FILENAME = Path(__file__).parent / "inventory.db"
-    db_already_exists = DB_FILENAME.exists()
+    if st.button("データを追加"):
+        new_id = str(uuid.uuid4())
+        worksheet.append_row([
+            date.strftime("%Y-%m-%d"), frag_45, frag_75, core, wipes, cost, price,
+            profit, meal_cost, meal_num, new_id
+        ])
+        st.session_state["records"] = get_user_records(worksheet)
+        st.success("データを追加しました！")
+        st.cache_data.clear()
+        st.session_state["worksheet"] = worksheet
+        st.session_state["selected_user"] = selected_user
+        st.session_state["records"] = get_user_records(worksheet)
+        st.rerun()
 
-    conn = sqlite3.connect(DB_FILENAME)
-    db_was_just_created = not db_already_exists
 
-    return conn, db_was_just_created
-
-
-def initialize_data(conn):
-    """Initializes the inventory table with some data."""
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_name TEXT,
-            price REAL,
-            units_sold INTEGER,
-            units_left INTEGER,
-            cost_price REAL,
-            reorder_point INTEGER,
-            description TEXT
+    # ------------------ 表示と編集 ------------------
+    st.write("### 過去のデータ")
+    st.text("※投入済みのデータの修正も可能です。修正後は保存ボタンを押さないと反映されません。利益と日付は手動変更出来ません。")
+    records = st.session_state.get("records", [])
+    if records:
+        df = pd.DataFrame(records)
+        df["日付"] = pd.to_datetime(df["日付"], errors="coerce")
+        df["月"] = df["日付"].dt.to_period("M").astype(str)
+        months = sorted(df["月"].unique(), reverse=True)
+        selected_month = st.selectbox("表示する月を選択", months + ["すべて表示"])
+        if st.session_state.get("last_selected_month") != selected_month:
+            st.cache_data.clear()
+            st.session_state["worksheet"] = worksheet
+            st.session_state["selected_user"] = selected_user
+            st.session_state["records"] = get_user_records(worksheet)
+            st.session_state["last_selected_month"] = selected_month
+            st.rerun()
+        filtered_df = df if selected_month == "すべて表示" else df[df["月"] == selected_month]
+        filtered_df = filtered_df.reset_index(drop=True)
+        filtered_df["日付"] = filtered_df["日付"].dt.date
+        filtered_df_display = filtered_df.style.format({"利益": lambda x : '{:,} G'.format(x),},thousands=',')
+        edited_df = st.data_editor(
+            filtered_df_display,
+            num_rows="dynamic",
+            use_container_width=False,
+            column_config={
+                "ID": st.column_config.Column(label="", width=0.01, disabled=True),
+                "月": st.column_config.Column(label="", width=0.01, disabled=True),
+                "日付": st.column_config.Column(disabled=True),
+                "利益": st.column_config.Column(width=100, disabled=True),
+            },
+            hide_index=True,
         )
-        """
-    )
+        if st.button("更新内容を保存"):
+            df_all = pd.DataFrame(get_user_records(worksheet))
+            df_all["日付"] = pd.to_datetime(df_all["日付"], errors="coerce")
+            df_all["月"] = df_all["日付"].dt.to_period("M").astype(str)
+            id_to_rownum = {row["ID"]: idx + 2 for idx, row in df_all.iterrows()}
+            for _, edited_row in edited_df.iterrows():
+                # 利益を再計算する
+                frag_45 = int(edited_row["欠片45"])
+                frag_75 = int(edited_row["欠片75"])
+                core = int(edited_row["核"])
+                wipes = int(edited_row["全滅回数"])
+                cost = float(edited_row["原価"])
+                price = float(edited_row["売値"])
+                meal_cost = float(edited_row["料理の価格"])
+                meal_num = int(edited_row["飯数"])
+                profit_new = price * (frag_45 * 45/99 + frag_75 * 75/99 + core) * (1 - commission)
+                profit_new -= cost * 30 * (frag_45 + frag_75 + core + wipes) / 4
+                profit_new -= meal_cost * (meal_num / 5)
+                profit_new =  int(profit_new * 10000)
+                edited_row["利益"] = profit_new
 
-    cursor.execute(
-        """
-        INSERT INTO inventory
-            (item_name, price, units_sold, units_left, cost_price, reorder_point, description)
-        VALUES
-            -- Beverages
-            ('Bottled Water (500ml)', 1.50, 115, 15, 0.80, 16, 'Hydrating bottled water'),
-            ('Soda (355ml)', 2.00, 93, 8, 1.20, 10, 'Carbonated soft drink'),
-            ('Energy Drink (250ml)', 2.50, 12, 18, 1.50, 8, 'High-caffeine energy drink'),
-            ('Coffee (hot, large)', 2.75, 11, 14, 1.80, 5, 'Freshly brewed hot coffee'),
-            ('Juice (200ml)', 2.25, 11, 9, 1.30, 5, 'Fruit juice blend'),
+                edited_row["日付"] = edited_row["日付"].strftime("%Y-%m-%d")
+                row_data = edited_row[df_all.columns.drop("月")].tolist()
+                
+                if edited_row["ID"] in id_to_rownum:
+                    row_number = id_to_rownum[edited_row["ID"]]
+                    for col_idx, val in enumerate(row_data, start=1):
+                        worksheet.update_cell(row_number, col_idx, val)
+                else:
+                    worksheet.append_row(row_data)
+            # 削除対象の特定と削除
+            df_target_month = df_all[df_all["月"] == selected_month]
+            existing_ids = set(df_target_month["ID"])
+            edited_ids = set(edited_df["ID"])
+            deleted_ids = existing_ids - edited_ids
+            rows_to_delete = [id_to_rownum[del_id] for del_id in deleted_ids if del_id in id_to_rownum]
+            for row_num in sorted(rows_to_delete, reverse=True):
+                worksheet.delete_rows(row_num)
+            st.session_state["records"] = get_user_records(worksheet)
+            st.success("保存しました")
+            st.cache_data.clear()
+            st.session_state["worksheet"] = worksheet
+            st.session_state["selected_user"] = selected_user
+            st.session_state["records"] = get_user_records(worksheet)
+            st.session_state["last_selected_month"] = selected_month
+            st.rerun()
+    sum_45 = filtered_df["欠片45"].astype(int).sum()
+    sum_75 = filtered_df["欠片75"].astype(int).sum()
+    sum_core = filtered_df["核"].astype(int).sum()
+    sum_profit = filtered_df["利益"].astype(int).sum()
 
-            -- Snacks
-            ('Potato Chips (small)', 2.00, 34, 16, 1.00, 10, 'Salted and crispy potato chips'),
-            ('Candy Bar', 1.50, 6, 19, 0.80, 15, 'Chocolate and candy bar'),
-            ('Granola Bar', 2.25, 3, 12, 1.30, 8, 'Healthy and nutritious granola bar'),
-            ('Cookies (pack of 6)', 2.50, 8, 8, 1.50, 5, 'Soft and chewy cookies'),
-            ('Fruit Snack Pack', 1.75, 5, 10, 1.00, 8, 'Assortment of dried fruits and nuts'),
+    st.markdown("### 📊 集計結果")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        left, right = st.columns([1, 5])
+        with left:
+            st.image("https://dqx-souba.game-blog.app/images/6578b09786230929d05e139c837fd666bb8652ec.png", width=40)
+        with right:
+            st.metric(label="欠片45 合計", value=f"{sum_45:,}")
+    with col2:
+        left, right = st.columns([1, 5])
+        with left:
+            st.image("https://dqx-souba.game-blog.app/images/6578b09786230929d05e139c837fd666bb8652ec.png", width=40)
+        with right:
+            st.metric(label="欠片75 合計", value=f"{sum_75:,}")
+    with col3:
+        left, right = st.columns([1, 5])
+        with left:
+            st.image("https://dqx-souba.game-blog.app/images/334b68b0abdd5d6c0a5cc7e7522674c5fd7a74bf.png", width=40)
+        with right:
+            st.metric(label="輝晶核 合計", value=f"{sum_core:,}")
+    with col4:
+        st.metric(label="💰 利益 合計", value=f"{sum_profit:,} G")
 
-            -- Personal Care
-            ('Toothpaste', 3.50, 1, 9, 2.00, 5, 'Minty toothpaste for oral hygiene'),
-            ('Hand Sanitizer (small)', 2.00, 2, 13, 1.20, 8, 'Small sanitizer bottle for on-the-go'),
-            ('Pain Relievers (pack)', 5.00, 1, 5, 3.00, 3, 'Over-the-counter pain relief medication'),
-            ('Bandages (box)', 3.00, 0, 10, 2.00, 5, 'Box of adhesive bandages for minor cuts'),
-            ('Sunscreen (small)', 5.50, 6, 5, 3.50, 3, 'Small bottle of sunscreen for sun protection'),
-
-            -- Household
-            ('Batteries (AA, pack of 4)', 4.00, 1, 5, 2.50, 3, 'Pack of 4 AA batteries'),
-            ('Light Bulbs (LED, 2-pack)', 6.00, 3, 3, 4.00, 2, 'Energy-efficient LED light bulbs'),
-            ('Trash Bags (small, 10-pack)', 3.00, 5, 10, 2.00, 5, 'Small trash bags for everyday use'),
-            ('Paper Towels (single roll)', 2.50, 3, 8, 1.50, 5, 'Single roll of paper towels'),
-            ('Multi-Surface Cleaner', 4.50, 2, 5, 3.00, 3, 'All-purpose cleaning spray'),
-
-            -- Others
-            ('Lottery Tickets', 2.00, 17, 20, 1.50, 10, 'Assorted lottery tickets'),
-            ('Newspaper', 1.50, 22, 20, 1.00, 5, 'Daily newspaper')
-        """
-    )
-    conn.commit()
-
-
-def load_data(conn):
-    """Loads the inventory data from the database."""
-    cursor = conn.cursor()
-
-    try:
-        cursor.execute("SELECT * FROM inventory")
-        data = cursor.fetchall()
-    except:
-        return None
-
-    df = pd.DataFrame(
-        data,
-        columns=[
-            "id",
-            "item_name",
-            "price",
-            "units_sold",
-            "units_left",
-            "cost_price",
-            "reorder_point",
-            "description",
-        ],
-    )
-
-    return df
-
-
-def update_data(conn, df, changes):
-    """Updates the inventory data in the database."""
-    cursor = conn.cursor()
-
-    if changes["edited_rows"]:
-        deltas = st.session_state.inventory_table["edited_rows"]
-        rows = []
-
-        for i, delta in deltas.items():
-            row_dict = df.iloc[i].to_dict()
-            row_dict.update(delta)
-            rows.append(row_dict)
-
-        cursor.executemany(
-            """
-            UPDATE inventory
-            SET
-                item_name = :item_name,
-                price = :price,
-                units_sold = :units_sold,
-                units_left = :units_left,
-                cost_price = :cost_price,
-                reorder_point = :reorder_point,
-                description = :description
-            WHERE id = :id
-            """,
-            rows,
-        )
-
-    if changes["added_rows"]:
-        cursor.executemany(
-            """
-            INSERT INTO inventory
-                (id, item_name, price, units_sold, units_left, cost_price, reorder_point, description)
-            VALUES
-                (:id, :item_name, :price, :units_sold, :units_left, :cost_price, :reorder_point, :description)
-            """,
-            (defaultdict(lambda: None, row) for row in changes["added_rows"]),
-        )
-
-    if changes["deleted_rows"]:
-        cursor.executemany(
-            "DELETE FROM inventory WHERE id = :id",
-            ({"id": int(df.loc[i, "id"])} for i in changes["deleted_rows"]),
-        )
-
-    conn.commit()
+# ------------------ グラフ ------------------
 
 
-# -----------------------------------------------------------------------------
-# Draw the actual page, starting with the inventory table.
+    st.write(f"### 累積利益推移")
+    df["月"] = df["日付"].dt.to_period("M").dt.to_timestamp()
 
-# Set the title that appears at the top of the page.
-"""
-# :shopping_bags: Inventory tracker
+    # ✅ 年の選択肢を動的に抽出
+    available_years = sorted(df["月"].dt.year.unique(), reverse=True)
+    selected_year = st.selectbox("表示する年を選択", available_years)
 
-**Welcome to Alice's Corner Store's intentory tracker!**
-This page reads and writes directly from/to our inventory database.
-"""
+    # ✅ 選択された年のデータだけにフィルタ
+    df_selected_year = df[df["月"].dt.year == selected_year]
 
-st.info(
-    """
-    Use the table below to add, remove, and edit items.
-    And don't forget to commit your changes when you're done.
-    """
-)
+    # 月別集計 ＆ 累積
+    monthly_profit = df_selected_year.groupby("月")["利益"].sum().reset_index()
+    monthly_profit["累積利益"] = monthly_profit["利益"].cumsum()
 
-# Connect to database and create table if needed
-conn, db_was_just_created = connect_db()
+    # ✅ 描画
+    line_chart = alt.Chart(monthly_profit).mark_line(point=True).encode(
+        x=alt.X("月:T", title="月"),
+        y=alt.Y("累積利益:Q", title="累積利益（G）"),
+        tooltip=["月", "累積利益"]
+    ).properties(width=700, height=300)
 
-# Initialize data.
-if db_was_just_created:
-    initialize_data(conn)
-    st.toast("Database initialized with some sample data.")
-
-# Load data from database
-df = load_data(conn)
-
-# Display data with editable table
-edited_df = st.data_editor(
-    df,
-    disabled=["id"],  # Don't allow editing the 'id' column.
-    num_rows="dynamic",  # Allow appending/deleting rows.
-    column_config={
-        # Show dollar sign before price columns.
-        "price": st.column_config.NumberColumn(format="$%.2f"),
-        "cost_price": st.column_config.NumberColumn(format="$%.2f"),
-    },
-    key="inventory_table",
-)
-
-has_uncommitted_changes = any(len(v) for v in st.session_state.inventory_table.values())
-
-st.button(
-    "Commit changes",
-    type="primary",
-    disabled=not has_uncommitted_changes,
-    # Update data in database
-    on_click=update_data,
-    args=(conn, df, st.session_state.inventory_table),
-)
-
-
-# -----------------------------------------------------------------------------
-# Now some cool charts
-
-# Add some space
-""
-""
-""
-
-st.subheader("Units left", divider="red")
-
-need_to_reorder = df[df["units_left"] < df["reorder_point"]].loc[:, "item_name"]
-
-if len(need_to_reorder) > 0:
-    items = "\n".join(f"* {name}" for name in need_to_reorder)
-
-    st.error(f"We're running dangerously low on the items below:\n {items}")
-
-""
-""
-
-st.altair_chart(
-    # Layer 1: Bar chart.
-    alt.Chart(df)
-    .mark_bar(
-        orient="horizontal",
-    )
-    .encode(
-        x="units_left",
-        y="item_name",
-    )
-    # Layer 2: Chart showing the reorder point.
-    + alt.Chart(df)
-    .mark_point(
-        shape="diamond",
-        filled=True,
-        size=50,
-        color="salmon",
-        opacity=1,
-    )
-    .encode(
-        x="reorder_point",
-        y="item_name",
-    ),
-    use_container_width=True,
-)
-
-st.caption("NOTE: The :diamonds: location shows the reorder point.")
-
-""
-""
-""
-
-# -----------------------------------------------------------------------------
-
-st.subheader("Best sellers", divider="orange")
-
-""
-""
-
-st.altair_chart(
-    alt.Chart(df)
-    .mark_bar(orient="horizontal")
-    .encode(
-        x="units_sold",
-        y=alt.Y("item_name").sort("-x"),
-    ),
-    use_container_width=True,
-)
+    st.altair_chart(line_chart, use_container_width=True)
