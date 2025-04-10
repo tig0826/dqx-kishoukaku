@@ -41,7 +41,10 @@ if selected_user == "新規作成":
         spreadsheet.add_worksheet(title=new_user, rows="1000", cols="20")
         sheet = spreadsheet.worksheet(new_user)
         sheet.append_row(["日付", "欠片45", "欠片75", "核", "全滅回数", "原価", "売値", "利益", "料理の価格", "飯数", "ID"])
+        st.cache_data.clear()
         st.success(f"{new_user} を作成しました。")
+        st.session_state["sheet_titles"] = [ws.title for ws in spreadsheet.worksheets() if ws.title != "全体データ"]
+        st.rerun()
 else:
     worksheet = st.session_state.get("worksheet")
     if worksheet is None or st.session_state.get("selected_user") != selected_user:
@@ -88,11 +91,12 @@ else:
         st.rerun()
 
 
-    # ------------------ 表示と編集 ------------------
-    st.write("### 過去のデータ")
-    st.text("※投入済みのデータの修正も可能です。修正後は保存ボタンを押さないと反映されません。利益と日付は手動変更出来ません。")
+
     records = st.session_state.get("records", [])
     if records:
+        # ------------------ 表示と編集 ------------------
+        st.write("### 過去のデータ")
+        st.text("※投入済みのデータの修正も可能です。修正後は保存ボタンを押さないと反映されません。利益と日付は手動変更出来ません。")
         df = pd.DataFrame(records)
         df["日付"] = pd.to_datetime(df["日付"], errors="coerce")
         df["月"] = df["日付"].dt.to_period("M").astype(str)
@@ -167,56 +171,56 @@ else:
             st.session_state["records"] = get_user_records(worksheet)
             st.session_state["last_selected_month"] = selected_month
             st.rerun()
-    sum_45 = filtered_df["欠片45"].astype(int).sum()
-    sum_75 = filtered_df["欠片75"].astype(int).sum()
-    sum_core = filtered_df["核"].astype(int).sum()
-    sum_profit = filtered_df["利益"].astype(int).sum()
+        sum_45 = filtered_df["欠片45"].astype(int).sum()
+        sum_75 = filtered_df["欠片75"].astype(int).sum()
+        sum_core = filtered_df["核"].astype(int).sum()
+        sum_profit = filtered_df["利益"].astype(int).sum()
 
-    st.markdown("### 📊 集計結果")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        left, right = st.columns([1, 5])
-        with left:
-            st.image("https://dqx-souba.game-blog.app/images/6578b09786230929d05e139c837fd666bb8652ec.png", width=40)
-        with right:
-            st.metric(label="欠片45 合計", value=f"{sum_45:,}")
-    with col2:
-        left, right = st.columns([1, 5])
-        with left:
-            st.image("https://dqx-souba.game-blog.app/images/6578b09786230929d05e139c837fd666bb8652ec.png", width=40)
-        with right:
-            st.metric(label="欠片75 合計", value=f"{sum_75:,}")
-    with col3:
-        left, right = st.columns([1, 5])
-        with left:
-            st.image("https://dqx-souba.game-blog.app/images/334b68b0abdd5d6c0a5cc7e7522674c5fd7a74bf.png", width=40)
-        with right:
-            st.metric(label="輝晶核 合計", value=f"{sum_core:,}")
-    with col4:
-        st.metric(label="💰 利益 合計", value=f"{sum_profit:,} G")
+        st.markdown("### 📊 集計結果")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            left, right = st.columns([1, 5])
+            with left:
+                st.image("https://dqx-souba.game-blog.app/images/6578b09786230929d05e139c837fd666bb8652ec.png", width=40)
+            with right:
+                st.metric(label="欠片45 合計", value=f"{sum_45:,}")
+        with col2:
+            left, right = st.columns([1, 5])
+            with left:
+                st.image("https://dqx-souba.game-blog.app/images/6578b09786230929d05e139c837fd666bb8652ec.png", width=40)
+            with right:
+                st.metric(label="欠片75 合計", value=f"{sum_75:,}")
+        with col3:
+            left, right = st.columns([1, 5])
+            with left:
+                st.image("https://dqx-souba.game-blog.app/images/334b68b0abdd5d6c0a5cc7e7522674c5fd7a74bf.png", width=40)
+            with right:
+                st.metric(label="輝晶核 合計", value=f"{sum_core:,}")
+        with col4:
+            st.metric(label="💰 利益 合計", value=f"{sum_profit:,} G")
 
-# ------------------ グラフ ------------------
+    # ------------------ グラフ ------------------
 
 
-    st.write(f"### 累積利益推移")
-    df["月"] = df["日付"].dt.to_period("M").dt.to_timestamp()
+        st.write(f"### 累積利益推移")
+        df["月"] = df["日付"].dt.to_period("M").dt.to_timestamp()
 
-    # ✅ 年の選択肢を動的に抽出
-    available_years = sorted(df["月"].dt.year.unique(), reverse=True)
-    selected_year = st.selectbox("表示する年を選択", available_years)
+        # ✅ 年の選択肢を動的に抽出
+        available_years = sorted(df["月"].dt.year.unique(), reverse=True)
+        selected_year = st.selectbox("表示する年を選択", available_years)
 
-    # ✅ 選択された年のデータだけにフィルタ
-    df_selected_year = df[df["月"].dt.year == selected_year]
+        # ✅ 選択された年のデータだけにフィルタ
+        df_selected_year = df[df["月"].dt.year == selected_year]
 
-    # 月別集計 ＆ 累積
-    monthly_profit = df_selected_year.groupby("月")["利益"].sum().reset_index()
-    monthly_profit["累積利益"] = monthly_profit["利益"].cumsum()
+        # 月別集計 ＆ 累積
+        monthly_profit = df_selected_year.groupby("月")["利益"].sum().reset_index()
+        monthly_profit["累積利益"] = monthly_profit["利益"].cumsum()
 
-    # ✅ 描画
-    line_chart = alt.Chart(monthly_profit).mark_line(point=True).encode(
-        x=alt.X("月:T", title="月"),
-        y=alt.Y("累積利益:Q", title="累積利益（G）"),
-        tooltip=["月", "累積利益"]
-    ).properties(width=700, height=300)
+        # ✅ 描画
+        line_chart = alt.Chart(monthly_profit).mark_line(point=True).encode(
+            x=alt.X("月:T", title="月"),
+            y=alt.Y("累積利益:Q", title="累積利益（G）"),
+            tooltip=["月", "累積利益"]
+        ).properties(width=700, height=300)
 
-    st.altair_chart(line_chart, use_container_width=True)
+        st.altair_chart(line_chart, use_container_width=True)
