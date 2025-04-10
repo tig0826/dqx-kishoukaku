@@ -14,6 +14,12 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+st.markdown("""
+    <style>
+    footer {visibility: hidden;}
+    .viewerBadge_container__1QSob {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
 
 # ------------------ キャッシュ関数 ------------------
 @st.cache_data(ttl=600)
