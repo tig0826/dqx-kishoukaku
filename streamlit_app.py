@@ -96,7 +96,6 @@ else:
         st.rerun()
 
 
-
     records = st.session_state.get("records", [])
     if records:
         # ------------------ 表示と編集 ------------------
@@ -117,6 +116,7 @@ else:
         filtered_df = df if selected_month == "すべて表示" else df[df["月"] == selected_month]
         filtered_df = filtered_df.reset_index(drop=True)
         filtered_df["日付"] = filtered_df["日付"].dt.date
+        # data_editorで表示する形に修正
         filtered_df_display = filtered_df.style.format({"利益": lambda x : '{:,} G'.format(x),},thousands=',')
         edited_df = st.data_editor(
             filtered_df_display,
@@ -131,43 +131,79 @@ else:
             hide_index=True,
         )
         if st.button("更新内容を保存"):
+            # 削除処理
+            # 行番号とIDの関係性を取得
             df_all = pd.DataFrame(get_user_records(worksheet))
             df_all["日付"] = pd.to_datetime(df_all["日付"], errors="coerce")
             df_all["月"] = df_all["日付"].dt.to_period("M").astype(str)
             id_to_rownum = {row["ID"]: idx + 2 for idx, row in df_all.iterrows()}
-            for _, edited_row in edited_df.iterrows():
-                # 利益を再計算する
-                frag_45 = int(edited_row["欠片45"])
-                frag_75 = int(edited_row["欠片75"])
-                core = int(edited_row["核"])
-                wipes = int(edited_row["全滅回数"])
-                cost = float(edited_row["原価"])
-                price = float(edited_row["売値"])
-                meal_cost = float(edited_row["料理の価格"])
-                meal_num = int(edited_row["飯数"])
-                profit_new = price * (frag_45 * 45/99 + frag_75 * 75/99 + core) * (1 - commission)
-                profit_new -= cost * 30 * (frag_45 + frag_75 + core + wipes) / 4
-                profit_new -= meal_cost * (meal_num / 5)
-                profit_new =  int(profit_new * 10000)
-                edited_row["利益"] = profit_new
-
-                edited_row["日付"] = edited_row["日付"].strftime("%Y-%m-%d")
-                row_data = edited_row[df_all.columns.drop("月")].tolist()
-                
-                if edited_row["ID"] in id_to_rownum:
-                    row_number = id_to_rownum[edited_row["ID"]]
-                    for col_idx, val in enumerate(row_data, start=1):
-                        worksheet.update_cell(row_number, col_idx, val)
-                else:
-                    worksheet.append_row(row_data)
-            # 削除対象の特定と削除
-            df_target_month = df_all[df_all["月"] == selected_month]
+            # 月でフィルタされたデータを表示
+            df_target_month = filtered_df
             existing_ids = set(df_target_month["ID"])
             edited_ids = set(edited_df["ID"])
+            # 削除されたIDを照合
             deleted_ids = existing_ids - edited_ids
+
+            # 編集された行の行番号一覧を取得
+            edited_rownums = [id_to_rownum[row["ID"]] for _, row in edited_df.iterrows() if row["ID"] in id_to_rownum]
+            if edited_rownums:
+
+                min_row = min(edited_rownums)
+                max_row = max(edited_rownums)
+
+                # 対象範囲のデータを切り出す
+                df_range = df_all.iloc[min_row - 2 : max_row - 1 + 1].copy()  # DataFrameのインデックスは0始まり
+                df_range = df_range.reset_index(drop=True)
+
+                edited_df_map = {row["ID"]: row for _, row in edited_df.iterrows()}
+                updated_rows = []
+                # その範囲に対して、edited_df の更新を反映
+                edited_df_map = {row["ID"]: row for _, row in edited_df.iterrows()}
+                for idx, row in df_range.iterrows():
+                    row_id = row["ID"]
+                    if row_id in edited_df_map:
+                        edited_row = edited_df_map[row_id]
+                        frag_45 = int(edited_row["欠片45"])
+                        frag_75 = int(edited_row["欠片75"])
+                        core = int(edited_row["核"])
+                        wipes = int(edited_row["全滅回数"])
+                        cost = float(edited_row["原価"])
+                        price = float(edited_row["売値"])
+                        meal_cost = float(edited_row["料理の価格"])
+                        meal_num = int(edited_row["飯数"])
+                        # 利益を再計算する
+                        profit_new = price * (frag_45 * 45/99 + frag_75 * 75/99 + core) * (1 - commission)
+                        profit_new -= cost * 30 * (frag_45 + frag_75 + core + wipes) / 4
+                        profit_new -= meal_cost * (meal_num / 5)
+                        profit_new = int(profit_new * 10000)
+                        for col in df_range.columns:
+                            if col in edited_row:
+                                df_range.at[idx, col] = edited_row[col]
+                        df_range.at[idx, "利益"] = profit_new
+                        df_range.at[idx, "日付"] = pd.to_datetime(edited_row["日付"]).strftime("%Y-%m-%d")
+                # 更新前に Timestamp → str に変換。削除された行が変換されずに含まれているので最後に全体を文字列化する
+                df_range_serializable = df_range.copy()
+                for col in df_range_serializable.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df_range_serializable[col]):
+                        df_range_serializable[col] = df_range_serializable[col].dt.strftime("%Y-%m-%d")
+                    else:
+                        df_range_serializable[col] = df_range_serializable[col].map(lambda x: str(x) if pd.notnull(x) else "")
+                # まず正しい range のサイズを確認する
+                num_rows = df_range_serializable.shape[0]
+                if num_rows == 0:
+                    pass  # 更新すべきデータがなければスキップ
+                else:
+                    end_row = min_row + num_rows - 1  # 実際の行数と一致させる
+                    range_str = f"A{min_row}:K{end_row}"
+                    # valuesをjson変換できる形に
+                    values = df_range_serializable[df_all.columns.drop("月")].astype(str).values.tolist()
+                    # 実行
+                    worksheet.update(range_str, values)
+            # 削除を行う
             rows_to_delete = [id_to_rownum[del_id] for del_id in deleted_ids if del_id in id_to_rownum]
             for row_num in sorted(rows_to_delete, reverse=True):
                 worksheet.delete_rows(row_num)
+
             st.session_state["records"] = get_user_records(worksheet)
             st.success("保存しました")
             st.cache_data.clear()
@@ -176,11 +212,11 @@ else:
             st.session_state["records"] = get_user_records(worksheet)
             st.session_state["last_selected_month"] = selected_month
             st.rerun()
+
         sum_45 = filtered_df["欠片45"].astype(int).sum()
         sum_75 = filtered_df["欠片75"].astype(int).sum()
         sum_core = filtered_df["核"].astype(int).sum()
         sum_profit = filtered_df["利益"].astype(int).sum()
-
         st.markdown("### 📊 集計結果")
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -206,17 +242,18 @@ else:
 
     # ------------------ グラフ ------------------
         st.write(f"### 累積利益推移")
+        df["週"] = df["日付"].dt.to_period("W").apply(lambda r: r.start_time)
         df["月"] = df["日付"].dt.to_period("M").dt.to_timestamp()
         available_years = sorted(df["月"].dt.year.unique(), reverse=True)
         selected_year = st.selectbox("表示する年を選択", available_years)
         df_selected_year = df[df["月"].dt.year == selected_year]
-        monthly_profit = df_selected_year.groupby("月")["利益"].sum().reset_index()
-        monthly_profit["累積利益"] = monthly_profit["利益"].cumsum()
+        weekly_profit = df_selected_year.groupby("週")["利益"].sum().reset_index()
+        weekly_profit["累積利益"] = weekly_profit["利益"].cumsum()
 
-        line_chart = alt.Chart(monthly_profit).mark_line(point=True).encode(
-            x=alt.X("月:T", title="月"),
+        line_chart = alt.Chart(weekly_profit).mark_line(point=True).encode(
+            x=alt.X("週:T", title="週"),
             y=alt.Y("累積利益:Q", title="累積利益（G）"),
-            tooltip=["月", "累積利益"]
+            tooltip=["週", "累積利益"]
         ).properties(width=700, height=300)
 
         st.altair_chart(line_chart, use_container_width=True)
