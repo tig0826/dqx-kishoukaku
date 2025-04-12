@@ -251,7 +251,7 @@ else:
         weekly_profit["累積利益"] = weekly_profit["利益"].cumsum()
 
         line_chart = alt.Chart(weekly_profit).mark_line(point=True).encode(
-            x=alt.X("週:T", title="週"),
+            x=alt.X("週:T", title="日付"),
             y=alt.Y("累積利益:Q", title="累積利益（G）"),
             tooltip=["週", "累積利益"]
         ).properties(width=700, height=300)
