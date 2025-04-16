@@ -143,6 +143,7 @@ else:
         st.text("※編集後は保存ボタンで反映されます。利益と日付は編集不可です")
         editable_df = filtered_df.drop(columns=["month"])
         editable_df["date"] = editable_df["date"].dt.date
+        editable_df["profit"] = editable_df["profit"].apply(lambda x: f"{x:,}")
 
         edited_df = st.data_editor(
             editable_df,
