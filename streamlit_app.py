@@ -100,10 +100,10 @@ else:
     with col3: core = st.number_input("核", min_value=0, step=1)
     with col4: wipes = st.number_input("全滅回数", min_value=0, step=1)
     col1, col2, col3, col4 = st.columns(4)
-    with col1: meal_cost = st.number_input("料理の価格(万G)", min_value=0.0, step=10.0)
+    with col1: meal_cost = st.number_input("料理の価格(万G)", min_value=0.00, step=0.1)
     with col2: meal_num = st.number_input("飯数", min_value=0, step=1)
-    with col3: cost = st.number_input("細胞の価格(万G)", min_value=0.0, step=1.0)
-    with col4: price = st.number_input("核の価格(万G)", min_value=0.0, step=100.0)
+    with col3: cost = st.number_input("細胞の価格(万G)",value=7.00, min_value=0.0, step=0.1)
+    with col4: price = st.number_input("核の価格(万G)",value=100.00, min_value=0.0, step=1.0)
 
     commission = 0.05
     profit = price * (frag_45 * 45/99 + frag_75 * 75/99 + core) * (1 - commission)
