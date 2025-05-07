@@ -82,6 +82,14 @@ if "usernames" not in st.session_state:
     st.session_state["usernames"] = st.session_state.supabase.get_user()["username"].tolist()
 selected_user = st.sidebar.selectbox("ユーザーを選択", ["新規作成"] + st.session_state["usernames"])
 
+# 初期化：前回値と更新時刻をセッションステートに保存
+if "inputs" not in st.session_state:
+    st.session_state.inputs = {}
+if "last_modified" not in st.session_state:
+    st.session_state.last_modified = None
+# 現在時刻
+now = datetime.now(timezone("Asia/Tokyo"))
+
 if selected_user == "新規作成":
     new_user = st.sidebar.text_input("新しいユーザー名を入力")
     if st.sidebar.button("ユーザー作成") and new_user:
@@ -104,13 +112,56 @@ else:
     with col2: meal_num = st.number_input("飯数", min_value=0, step=1)
     with col3: cost = st.number_input("細胞の価格(万G)",value=7.00, min_value=0.0, step=0.1)
     with col4: price = st.number_input("核の価格(万G)",value=100.00, min_value=0.0, step=1.0)
-
+    # 現在の入力をまとめる
+    current_inputs = {
+        "frag_45": frag_45,
+        "frag_75": frag_75,
+        "core": core,
+        "wipes": wipes,
+        "meal_cost": meal_cost,
+        "meal_num": meal_num,
+        "cost": cost,
+        "price": price,
+    }
+    # 入力変更があったかチェック
+    if current_inputs != st.session_state.inputs:
+        st.session_state.inputs = current_inputs.copy()
+        st.session_state.last_modified = now
     commission = 0.05
     profit = price * (frag_45 * 45/99 + frag_75 * 75/99 + core) * (1 - commission)
     profit -= cost * 30 * (frag_45 + frag_75 + core + wipes) / 4
     profit -= meal_cost * (meal_num / 5)
     profit = int(profit * 10000)
-    st.markdown(f"💰 **利益の見込み**: `{int(profit):,} G`")
+    count = frag_45 + frag_75 + core + wipes
+    html = """
+    <div style="display: flex; gap: 2rem;">
+      <div style="flex: 1; background-color: #2b2b2b; padding: 1rem; border-radius: 1rem; border: 1px solid #555;">
+        <div style="color: #e0b973; font-size: 1.2rem; font-weight: bold; display: flex; align-items: center;">
+          💰 現在の利益
+        </div>
+        <div style="font-size: 2rem; color: #66cc99; font-weight: bold;">
+          {profit} G
+        </div>
+      </div>
+      <div style="flex: 1; background-color: #2b2b2b; padding: 1rem; border-radius: 1rem; border: 1px solid #555;">
+        <div style="color: #a3d0ff; font-size: 1.2rem; font-weight: bold; display: flex; align-items: center;">
+          🔁 現在の周回数
+        </div>
+        <div style="font-size: 2rem; color: #80bfff; font-weight: bold;">
+          {count} 周 ({cycles} 餅目)
+        </div>
+      </div>
+    </div>
+    """.format(
+        profit=f"{profit:,}",
+        count=f"{count:,}",
+        cycles=count // 4
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+    # 最後の変更時刻を表示
+    if st.session_state.last_modified:
+        st.markdown(f"**最後に変更した時刻**: `{st.session_state.last_modified.strftime('%Y-%m-%d %H:%M:%S')}`")
 
     if st.button("データを追加"):
         new_id = str(uuid.uuid4())
@@ -234,6 +285,15 @@ else:
         selected_year = st.selectbox("表示する年を選択", available_years)
         df_selected_year = df[df["月"].dt.year == selected_year]
         weekly_profit = df_selected_year.groupby("週")["profit"].sum().reset_index()
+
+        # 欠けている週を補完
+        min_week = weekly_profit["週"].min()
+        max_week = weekly_profit["週"].max()
+        all_weeks = pd.date_range(start=min_week, end=max_week, freq="W-MON")
+
+        df_weeks = pd.DataFrame({"週": all_weeks})
+        weekly_profit = df_weeks.merge(weekly_profit, on="週", how="left").fillna(0)
+
         weekly_profit["累積利益"] = weekly_profit["profit"].cumsum()
 
         line_chart = alt.Chart(weekly_profit).mark_line(point=True).encode(
