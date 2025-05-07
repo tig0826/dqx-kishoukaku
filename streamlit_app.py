@@ -1,4 +1,5 @@
 import altair as alt
+import math
 import streamlit as st
 from supabase import create_client, Client
 import pandas as pd
@@ -137,7 +138,7 @@ else:
     <div style="display: flex; gap: 2rem;">
       <div style="flex: 1; background-color: #2b2b2b; padding: 1rem; border-radius: 1rem; border: 1px solid #555;">
         <div style="color: #e0b973; font-size: 1.2rem; font-weight: bold; display: flex; align-items: center;">
-          💰 現在の利益
+          現在の利益
         </div>
         <div style="font-size: 2rem; color: #66cc99; font-weight: bold;">
           {profit} G
@@ -145,7 +146,7 @@ else:
       </div>
       <div style="flex: 1; background-color: #2b2b2b; padding: 1rem; border-radius: 1rem; border: 1px solid #555;">
         <div style="color: #a3d0ff; font-size: 1.2rem; font-weight: bold; display: flex; align-items: center;">
-          🔁 現在の周回数
+          現在の周回数
         </div>
         <div style="font-size: 2rem; color: #80bfff; font-weight: bold;">
           {count} 周 ({cycles} 餅目)
@@ -155,7 +156,7 @@ else:
     """.format(
         profit=f"{profit:,}",
         count=f"{count:,}",
-        cycles=count // 4
+        cycles = math.ceil(count / 4)
     )
     st.markdown(html, unsafe_allow_html=True)
 
