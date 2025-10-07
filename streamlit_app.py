@@ -45,7 +45,7 @@ class SupabaseDB:
         return response
     def get_user(self):
         # ユーザ情報を取得する
-        response = self.client.table("users").select("*").execute()
+        response = self.client.table("users").select("*").order("last_activity", desc=True).execute()
         return pd.DataFrame(response.data)
     def get_records_by_user(self, username: str):
         # ユーザに関連するレコードを取得する
