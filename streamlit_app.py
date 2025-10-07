@@ -67,6 +67,13 @@ class SupabaseDB:
             .eq("id", record_id) \
             .execute()
         return response
+    def update_user_last_activity(self, username: str):
+        """ユーザーの最終更新時刻を更新"""
+        try:
+            now = datetime.now(timezone("Asia/Tokyo")).isoformat()
+            self.client.table("users").update({"last_activity": now}).eq("username", username).execute()
+        except Exception as e:
+            print(f"last_activity更新失敗: {e}")
 
 def calculate_profit(frag_45, frag_75, core, wipes, meal_cost, meal_num, cost, price):
     commission = 0.05
@@ -181,6 +188,7 @@ else:
             "meal_num": meal_num,
         }
         st.session_state.supabase.add_record(record)
+        st.session_state.supabase.update_user_last_activity(selected_user)
         st.success("データを追加しました！")
         st.rerun()
     # ------------------ データ表示 ------------------
@@ -239,6 +247,7 @@ else:
                 )
                 try:
                     res = st.session_state.supabase.update_record(record_id, new_values)
+                    st.session_state.supabase.update_user_last_activity(selected_user)
                 except Exception as e:
                     st.error(f"更新失敗: {e}")
             # 削除処理
