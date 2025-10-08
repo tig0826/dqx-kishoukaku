@@ -1,0 +1,27 @@
+[project]
+name = "dqx-kishoukaku"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "tig0826",email = "tigcr0826@gmail.com"}
+]
+readme = "README.md"
+dependencies = [
+    "shillelagh (>=1.3.5,<2.0.0)",
+    "pandas (>=2.2.3,<3.0.0)",
+    "gspread (>=6.2.0,<7.0.0)",
+    "gsheetsdb (>=0.1.13.1,<0.2.0.0)",
+    "gspread-dataframe (>=4.0.0,<5.0.0)",
+    "oauth2client (>=4.1.3,<5.0.0)",
+    "ipython (>=9.1.0,<10.0.0)",
+    "streamlit (>=1.44.1,<2.0.0)",
+    "supabase (>=2.15.0,<3.0.0)",
+    "streamlit-autorefresh (>=1.0.1,<2.0.0)"
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

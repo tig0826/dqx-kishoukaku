@@ -1,13 +1,15 @@
 import altair as alt
 import math
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 from supabase import create_client, Client
+import time
 import pandas as pd
 from pytz import timezone
 import uuid
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone, timedelta
 
 st.set_page_config(
     page_title="輝晶核家計簿", 
@@ -74,6 +76,21 @@ class SupabaseDB:
             self.client.table("users").update({"last_activity": now}).eq("username", username).execute()
         except Exception as e:
             print(f"last_activity更新失敗: {e}")
+    def get_latest_price(self, item_name: str) -> float | None:
+        """
+        latest_prices から item_id の最新 p5_price を Gold 単位で返す（なければ None）
+        """
+        try:
+            res = self.client.table("mrt_price_hourly") \
+                .select("p5_price") \
+                .eq("item_id", item_name) \
+                .single() \
+                .execute()
+            if res.data and "p5_price" in res.data:
+                return float(res.data["p5_price"])
+        except Exception as e:
+            print(f"最新価格取得失敗({item_name}): {e}")
+        return None
 
 def calculate_profit(frag_45, frag_75, core, wipes, meal_cost, meal_num, cost, price):
     commission = 0.05
@@ -95,6 +112,15 @@ if "inputs" not in st.session_state:
     st.session_state.inputs = {}
 if "last_modified" not in st.session_state:
     st.session_state.last_modified = None
+    # ---- セッション初期値（初回だけ） ----
+    if "frag_45" not in st.session_state: st.session_state.frag_45 = 0
+    if "frag_75" not in st.session_state: st.session_state.frag_75 = 0
+    if "core"    not in st.session_state: st.session_state.core    = 0
+    if "wipes"   not in st.session_state: st.session_state.wipes   = 0
+    if "meal_cost" not in st.session_state: st.session_state.meal_cost = 0.0
+    if "meal_num"  not in st.session_state: st.session_state.meal_num  = 0
+    if "cost"      not in st.session_state: st.session_state.cost      = 7.00
+    if "price"     not in st.session_state: st.session_state.price     = 100.00
 # 現在時刻
 now = datetime.now(timezone("Asia/Tokyo"))
 
@@ -111,36 +137,74 @@ else:
     # ------------------ 入力フォーム ------------------
     date = st.date_input("日付", datetime.now(timezone("Asia/Tokyo")).date())
     col1, col2, col3, col4 = st.columns(4)
-    with col1: frag_45 = st.number_input("欠片45", min_value=0, step=1)
-    with col2: frag_75 = st.number_input("欠片75", min_value=0, step=1)
-    with col3: core = st.number_input("核", min_value=0, step=1)
-    with col4: wipes = st.number_input("全滅回数", min_value=0, step=1)
+    with col1: frag_45 = st.number_input("欠片45", min_value=0, step=1, key="frag_45")
+    with col2: frag_75 = st.number_input("欠片75", min_value=0, step=1, key="frag_75")
+    with col3: core = st.number_input("核", min_value=0, step=1, key="core")
+    with col4: wipes = st.number_input("全滅回数", min_value=0, step=1, key="wipes")
     col1, col2, col3, col4 = st.columns(4)
-    with col1: meal_cost = st.number_input("料理の価格(万G)", min_value=0.00, step=0.1)
-    with col2: meal_num = st.number_input("飯数", min_value=0, step=1)
-    with col3: cost = st.number_input("細胞の価格(万G)",value=7.00, min_value=0.0, step=0.1)
-    with col4: price = st.number_input("核の価格(万G)",value=100.00, min_value=0.0, step=1.0)
-    # 現在の入力をまとめる
+    with col1: meal_cost = st.number_input("料理の価格(万G)", min_value=0.00, step=0.1, key="meal_cost")
+    with col2: meal_num = st.number_input("飯数", min_value=0, step=1, key="meal_num")
+    with col3: cost = st.number_input("細胞の価格(万G)", min_value=0.0, step=0.1, key="cost")
+    with col4: price = st.number_input("核の価格(万G)", min_value=0.0, step=1.0, key="price")
+
+    # -------- 相場の自動投入ボタン --------
+    def _apply_market(kaku_item: str, saibou_item: str):
+        # Gold -> 万G へ
+        kaku = st.session_state.supabase.get_latest_price(kaku_item)
+        saibou = st.session_state.supabase.get_latest_price(saibou_item)
+        kakera_item = saibou_item + "のかけら"
+        kakera = st.session_state.supabase.get_latest_price(kakera_item)
+        if kaku is not None:
+            st.session_state.price = round(kaku / 10000, 1)
+        if saibou is not None:
+            saibou = min(saibou, kakera * 20) if kakera is not None else saibou
+            st.session_state.cost = round(saibou / 10000, 2)
+        else:
+            st.warning("相場データが見つかりませんでした。")
+
+
+    # 最新価格の取得ボタン
+    st.markdown(
+        "<div style='color:#999; padding-top:6px;'>このボタンを押すと最新の相場の細胞・核の価格が入力されます</div>",
+        unsafe_allow_html=True
+    )
+    col1, col2 = st.columns([2, 2])
+    with col1:
+        st.button(
+            "輝晶核",
+            on_click=_apply_market,
+            kwargs={"kaku_item": "輝晶核", "saibou_item": "魔因細胞"},
+            use_container_width=True,
+        )
+    with col2:
+        st.button(
+            "閃輝晶核",
+            on_click=_apply_market,
+            kwargs={"kaku_item": "閃輝晶核", "saibou_item": "閃魔細胞"},
+            use_container_width=True,
+        )
+
     current_inputs = {
-        "frag_45": frag_45,
-        "frag_75": frag_75,
-        "core": core,
-        "wipes": wipes,
-        "meal_cost": meal_cost,
-        "meal_num": meal_num,
-        "cost": cost,
-        "price": price,
+        "frag_45": st.session_state.frag_45,
+        "frag_75": st.session_state.frag_75,
+        "core":    st.session_state.core,
+        "wipes":   st.session_state.wipes,
+        "meal_cost": st.session_state.meal_cost,
+        "meal_num":  st.session_state.meal_num,
+        "cost":      st.session_state.cost,
+        "price":     st.session_state.price,
     }
-    # 入力変更があったかチェック
-    if current_inputs != st.session_state.inputs:
-        st.session_state.inputs = current_inputs.copy()
-        st.session_state.last_modified = now
+
     commission = 0.05
-    profit = price * (frag_45 * 45/99 + frag_75 * 75/99 + core) * (1 - commission)
-    profit -= cost * 30 * (frag_45 + frag_75 + core + wipes) / 4
-    profit -= meal_cost * (meal_num / 5)
+    profit = (
+        st.session_state.price * (st.session_state.frag_45 * 45/99 + st.session_state.frag_75 * 75/99 + st.session_state.core) * (1 - commission)
+        - st.session_state.cost * 30 * (st.session_state.frag_45 + st.session_state.frag_75 + st.session_state.core + st.session_state.wipes) / 4
+        - st.session_state.meal_cost * (st.session_state.meal_num / 5)
+    )
     profit = int(profit * 10000)
-    count = frag_45 + frag_75 + core + wipes
+    count = st.session_state.frag_45 + st.session_state.frag_75 + st.session_state.core + st.session_state.wipes
+
+
     html = """
     <div style="display: flex; gap: 2rem;">
       <div style="flex: 1; background-color: #2b2b2b; padding: 1rem; border-radius: 1rem; border: 1px solid #555;">
@@ -167,31 +231,50 @@ else:
     )
     st.markdown(html, unsafe_allow_html=True)
 
-    # 最後の変更時刻を表示
-    if st.session_state.last_modified:
-        st.markdown(f"**最後に変更した時刻**: `{st.session_state.last_modified.strftime('%Y-%m-%d %H:%M:%S')}`")
-
-    if st.button("データを追加"):
+    st.markdown(
+        "<div style='margin-top:1em;margin-bottom:0.3em;color:#ffcc00;'>⚠️ 入力したデータは、このボタンを押さないと保存されません。</div>",
+        unsafe_allow_html=True
+    )
+    if st.button("データを追加", use_container_width=True):
         new_id = str(uuid.uuid4())
         record = {
             "id": new_id,
             "username": selected_user,
             "date": date.strftime("%Y-%m-%d"),
-            "frag_45": frag_45,
-            "frag_75": frag_75,
-            "core": core,
-            "wipes": wipes,
-            "cost": cost,
-            "price": price,
+            "frag_45": st.session_state.frag_45,
+            "frag_75": st.session_state.frag_75,
+            "core": st.session_state.core,
+            "wipes": st.session_state.wipes,
+            "cost": st.session_state.cost,
+            "price": st.session_state.price,
             "profit": profit,
-            "meal_cost": meal_cost,
-            "meal_num": meal_num,
+            "meal_cost": st.session_state.meal_cost,
+            "meal_num": st.session_state.meal_num,
         }
         st.session_state.supabase.add_record(record)
         st.session_state.supabase.update_user_last_activity(selected_user)
         st.success("データを追加しました！")
         st.rerun()
+
+    # 前回カウントを変更した際の時刻を表示
+    # 45, 75 , core, wipesを変更したときのみ更新
+    current_count_inputs = {
+        "frag_45": st.session_state.frag_45,
+        "frag_75": st.session_state.frag_75,
+        "core":    st.session_state.core,
+        "wipes":   st.session_state.wipes,
+    }
+    if current_count_inputs != {k: st.session_state.inputs.get(k, None) for k in current_count_inputs}:
+        st.session_state.last_modified = now
+        st.session_state.inputs.update(current_count_inputs)
+    if st.session_state.last_modified:
+        st.info(f"最後にカウントを入力した時間: {st.session_state.last_modified.strftime('%H:%M:%S')}")
+
+
     # ------------------ データ表示 ------------------
+    st.divider()
+    st.subheader("投入済みデータ")
+    st.caption("※表の編集後は『更新内容を保存』ボタンで反映されます（利益・日付は編集不可）")
     df = st.session_state.supabase.get_records_by_user(selected_user)
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -200,7 +283,6 @@ else:
         selected_month = st.selectbox("表示する月を選択", months + ["すべて表示"])
         filtered_df = df if selected_month == "すべて表示" else df[df["month"] == selected_month]
         filtered_df = filtered_df.reset_index(drop=True)
-        st.text("※編集後は保存ボタンで反映されます。利益と日付は編集不可です")
         editable_df = filtered_df.drop(columns=["month"])
         editable_df["date"] = editable_df["date"].dt.date
         editable_df["profit"] = editable_df["profit"].apply(lambda x: f"{x:,}")
@@ -226,7 +308,11 @@ else:
             hide_index=True,
             num_rows="dynamic"
         )
-        if st.button("更新内容を保存"):
+        st.markdown(
+            "<div style='margin-top:1em;margin-bottom:0.3em;color:#ffcc00;'>⚠️ 修正したデータは、このボタンを押さないと保存されません。</div>",
+            unsafe_allow_html=True
+        )
+        if st.button("更新内容を保存", use_container_width=True):
             before_ids = set(filtered_df["id"])
             after_ids = set(edited_df["id"])
             deleted_ids = before_ids - after_ids
@@ -288,6 +374,7 @@ else:
             st.metric(label="💰 利益 合計", value=f"{sum_profit:,} G")
 
     # ------------------ グラフ ------------------
+        st.divider()
         st.write(f"### 累積利益推移")
         df["週"] = df["date"].dt.to_period("W").apply(lambda r: r.start_time)
         df["月"] = df["date"].dt.to_period("M").dt.to_timestamp()
