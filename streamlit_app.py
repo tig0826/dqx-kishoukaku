@@ -1,14 +1,13 @@
 import altair as alt
 import math
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
+# from streamlit_autorefresh import st_autorefresh
 from supabase import create_client, Client
 import time
 import pandas as pd
 from pytz import timezone
 import uuid
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+# from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timezone as dt_timezone, timedelta
 
 st.set_page_config(
@@ -99,6 +98,203 @@ def calculate_profit(frag_45, frag_75, core, wipes, meal_cost, meal_num, cost, p
     profit -= meal_cost * (meal_num / 5)
     return int(profit * 10000)
 
+def reset_count():
+    """_reset_counts=Trueなら次のランで実際に初期化してからフラグを戻す"""
+    for k, v in [("frag_45",0), ("frag_75",0), ("core",0), ("wipes",0)]:
+        st.session_state[k] = v
+    st.session_state._last_total = 0
+    st.session_state._last_45 = 0
+    st.session_state._last_75 = 0
+    st.session_state._last_core = 0
+    st.session_state._last_wipes = 0
+    st.session_state.count_logs = []
+    st.session_state._flash_msg = ("info", "カウントと履歴をクリアしました")
+
+def record_count(now):
+    """合計が増えたときだけログを追加（減った時は無視）"""
+    cur = st.session_state.frag_45 + st.session_state.frag_75 + st.session_state.core + st.session_state.wipes
+    prev = st.session_state._last_total
+    prev_45 = st.session_state._last_45
+    prev_75 = st.session_state._last_75
+    prev_core = st.session_state._last_core
+    prev_wipes = st.session_state._last_wipes
+    if cur > prev:
+        # prev_45, prev_75, prev_core, prev_wipesの内変化したものを更新
+        if st.session_state.frag_45 != prev_45:
+            st.session_state._last_45 = st.session_state.frag_45
+            kind = "欠片45"
+        if st.session_state.frag_75 != prev_75:
+            st.session_state._last_75 = st.session_state.frag_75
+            kind = "欠片75"
+        if st.session_state.core != prev_core:
+            st.session_state._last_core = st.session_state.core
+            kind = "核"
+        if st.session_state.wipes != prev_wipes:
+            st.session_state._last_wipes = st.session_state.wipes
+            kind = "全滅"
+        st.session_state.count_logs.append({"ts": now, "合計": cur, "kind": kind})
+        st.session_state._last_total = cur
+
+
+
+def _lerp(a, b, t): return a + (b - a) * t
+def _hex(r,g,b): return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+def _color_by_minutes(mins: float) -> str:
+    m = max(0.0, float(mins))
+    if m >= 5: return "#e74c3c"  # 赤
+    if m <= 2.5:
+        t = m / 2.5
+        r = _lerp(0x2e, 0xf1, t); g = _lerp(0xcc, 0xc4, t); b = _lerp(0x71, 0x0f, t)
+    else:
+        t = (m - 2.5) / 2.5
+        r = _lerp(0xf1, 0xe7, t); g = _lerp(0xc4, 0x4c, t); b = _lerp(0x0f, 0x3c, t)
+    return _hex(r,g,b)
+
+_KIND_STYLE = {
+    "欠片45": {"fill": "#22d3ee", "shape": "triangle"},  # シアン
+    "欠片75": {"fill": "#a78bfa", "shape": "diamond"},   # バイオレット
+    "核":   {"fill": "#f472b6", "shape": "circle"},    # ピンク
+    "全滅":  {"fill": "#94a3b8", "shape": "square"},    # スレートグレー
+}
+
+def _marker_svg(x, y, size, kind, title_text):
+    stl = _KIND_STYLE.get(kind, {"fill":"#22d3ee", "shape":"circle"})
+    s = size
+    stroke = '#111827'  # ダークな縁取り（背景が暗い想定）。明るい背景なら "#ffffff" に
+    sw = 1.25
+
+    if stl["shape"] == "triangle":
+        pts = f"{x},{y-s} {x-s*0.9},{y+s*0.8} {x+s*0.9},{y+s*0.8}"
+        return f'<polygon points="{pts}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></polygon>'
+    if stl["shape"] == "diamond":
+        pts = f"{x},{y-s} {x-s},{y} {x},{y+s} {x+s},{y}"
+        return f'<polygon points="{pts}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></polygon>'
+    if stl["shape"] == "square":
+        return f'<rect x="{x-s}" y="{y-s}" width="{2*s}" height="{2*s}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></rect>'
+    return f'<circle cx="{x}" cy="{y}" r="{s}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></circle>'
+
+def render_count_logs(logs, min_span_min=5, warn_minutes=5, title="⏱ カウント履歴"):
+    if not logs or not isinstance(logs, list) or not all(isinstance(x, dict) and "ts" in x for x in logs):
+        st.subheader(title)
+        st.caption("まだカウント履歴はありません。")
+        # ここで開始ボタンを表示（何もカウントがない時）
+        if st.button("⏱ カウント開始", type="secondary"):
+            now_jst = pd.Timestamp.now(tz="Asia/Tokyo")
+            st.session_state.count_logs = [{"ts": now_jst, "kind": "start", "合計": 0}]
+            st.success("カウントを開始しました")
+            st.rerun()
+        return
+    df = pd.DataFrame(logs).copy()
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    df = df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+    if df.empty:
+        st.subheader(title); st.caption("有効なタイムスタンプがありません。"); return
+
+    t0 = df["ts"].iloc[0]
+    tzinfo = df["ts"].dt.tz  # tzinfo または None（Series ではない）
+    now = pd.Timestamp.now(tz=tzinfo) if tzinfo is not None else pd.Timestamp.now()
+
+    df["min_from_start"] = (df["ts"] - t0).dt.total_seconds() / 60.0
+    # 次の入力までの区間（最後は now まで）
+    next_ts = list(df["ts"].iloc[1:]) + [now]
+    df["delta_min"] = (pd.Series(next_ts, dtype="datetime64[ns, UTC]" if tzinfo is not None else "datetime64[ns]") - df["ts"]).dt.total_seconds() / 60.0
+    df["delta_min"] = df["delta_min"].clip(lower=0)
+
+    total_span = max(float(min_span_min), float(df["min_from_start"].iloc[-1] + df["delta_min"].iloc[-1]))
+
+    # ---- SVG パラメータ ----
+    W, H = 2000, 60
+    PAD_L, PAD_R = 48, 12
+    Y, BAR_H, MARK_R = H/2, 8, 5
+    def sx(mins): return PAD_L + (W - PAD_L - PAD_R) * (mins / total_span)
+
+    # 目盛り
+    ticks = []
+    for m in range(0, int(math.ceil(total_span)) + 1):
+        x = sx(m)
+        is_major = m % 5 == 0
+        h = 12 if is_major else 6  # 長めに
+        sw = 2 if is_major else 1.2
+        col = "#f3f4f6" if is_major else "#6b7280"  # 明度を上げて視認性UP
+
+        # 目盛り線
+        ticks.append(
+            f'<line x1="{x}" y1="{Y+BAR_H+10}" x2="{x}" y2="{Y+BAR_H+10+h}" stroke="{col}" stroke-width="{sw}" />'
+        )
+
+        # 5分ごとの数字（太字・大きめ）
+        if is_major:
+            ticks.append(
+                f'<text x="{x}" y="{Y+BAR_H+35}" fill="#f9fafb" font-size="18" font-weight="700" text-anchor="middle">{m}</text>'
+            )
+
+    axis = "\n".join(ticks)
+    axis_label = (
+        f'<text x="{PAD_L-36}" y="{Y+BAR_H+35}" fill="#e5e7eb" font-size="17" font-weight="600">分</text>'
+    )
+
+    # 区間色
+    segs = []
+    for i in range(len(df)):
+        x0 = sx(df["min_from_start"].iloc[i])
+        x1 = sx(min(df["min_from_start"].iloc[i] + df["delta_min"].iloc[i], total_span))
+        w = max(0.5, x1 - x0)
+        col = _color_by_minutes(df["delta_min"].iloc[i])
+        BAR_OPACITY = 0.45
+        segs.append(
+            f'<rect x="{x0}" y="{Y-BAR_H/2}" width="{w}" height="{BAR_H}" fill="{col}" fill-opacity="{BAR_OPACITY}" />'
+        )
+
+    # マーカー
+    marks = []
+    for i, r in df.iterrows():
+        x = sx(r["min_from_start"]); y = Y
+        info = f'{r["ts"].strftime("%H:%M:%S")}｜先頭から{r["min_from_start"]:.1f}分｜合計{int(r["合計"])}｜kind:{r.get("kind","-")}'
+        marks.append(_marker_svg(x, y, MARK_R, r.get("kind",""), info))
+
+    # レジェンド
+    legend_x = PAD_L; legend_y = 14; lg = []
+    for k, stl in _KIND_STYLE.items():
+        lg.append(f'<rect x="{legend_x}" y="{legend_y-8}" width="10" height="10" fill="{stl["fill"]}" rx="2"/>')
+        lg.append(f'<text x="{legend_x+14}" y="{legend_y}" fill="#d1d5db" font-size="11">{k}</text>')
+        legend_x += 70
+
+    svg = f'''
+<svg viewBox="0 0 {W} {H+28}" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="{W}" height="{H+28}" fill="transparent"/>
+  <line x1="{PAD_L}" y1="{Y}" x2="{W-PAD_R}" y2="{Y}" stroke="#52525b" stroke-width="1"/>
+  {"".join(segs)}
+  {"".join(marks)}
+  {axis}
+  {axis_label}
+  {"".join(lg)}
+</svg>
+    '''
+    st.subheader(title)
+    st.markdown(svg, unsafe_allow_html=True)
+
+    # フッタ
+    df = df.sort_values("ts").reset_index(drop=True)
+    if df.iloc[0]["kind"] != "start":
+        df = pd.concat([
+            pd.DataFrame([{"ts": df.iloc[0]["ts"], "kind": "start", "合計": 0}]),
+            df
+        ], ignore_index=True)
+
+    # 合計経過時間（start → 最終イベント）
+    total_elapsed_min = (df["ts"].iloc[-1] - df["ts"].iloc[0]).total_seconds() / 60
+
+    # 平均時間（start→最初のカウント も含む連続差分の平均）
+    intervals_min = df["ts"].diff().iloc[1:].dt.total_seconds().div(60)
+    avg_interval_min = float(intervals_min.mean()) if len(intervals_min) else 0.0
+
+    # 表示
+    st.caption(
+        f"⏳ 合計経過時間: **{total_elapsed_min:.1f} 分**　｜　"
+        f"⏱ 平均時間: **{avg_interval_min:.1f} 分/回**"
+    )
+
+
 if "supabase" not in st.session_state:
     st.session_state["supabase"] = SupabaseDB()
 # ------------------ ユーザー選択 or 新規作成 ------------------
@@ -121,6 +317,28 @@ if "last_modified" not in st.session_state:
     if "meal_num"  not in st.session_state: st.session_state.meal_num  = 0
     if "cost"      not in st.session_state: st.session_state.cost      = 7.00
     if "price"     not in st.session_state: st.session_state.price     = 100.00
+# カウントログの初期化
+if "count_logs" not in st.session_state:
+    st.session_state.count_logs = []
+if "_reset_counts" not in st.session_state:
+    st.session_state._reset_counts = False
+if "_last_total" not in st.session_state:
+    st.session_state._last_total = 0
+if "_last_45" not in st.session_state:
+    st.session_state._last_45 = 0
+if "_last_75" not in st.session_state:
+    st.session_state._last_75 = 0
+if "_last_core" not in st.session_state:
+    st.session_state._last_core = 0
+if "_last_wipes" not in st.session_state:
+    st.session_state._last_wipes = 0
+
+
+# カウントのリセット
+if st.session_state._reset_counts:
+    reset_count()
+    st.session_state._reset_counts = False
+
 # 現在時刻
 now = datetime.now(timezone("Asia/Tokyo"))
 
@@ -134,6 +352,10 @@ if selected_user == "新規作成":
         st.rerun()
 else:
     st.header(f"{selected_user} の輝晶核家計簿")
+    # 通知表示
+    msg = st.session_state.pop("_flash_msg", None)
+    if msg:
+        getattr(st, msg[0])(msg[1])
     # ------------------ 入力フォーム ------------------
     date = st.date_input("日付", datetime.now(timezone("Asia/Tokyo")).date())
     col1, col2, col3, col4 = st.columns(4)
@@ -142,10 +364,10 @@ else:
     with col3: core = st.number_input("核", min_value=0, step=1, key="core")
     with col4: wipes = st.number_input("全滅回数", min_value=0, step=1, key="wipes")
     col1, col2, col3, col4 = st.columns(4)
-    with col1: meal_cost = st.number_input("料理の価格(万G)", min_value=0.00, step=0.1, key="meal_cost")
+    with col1: meal_cost = st.number_input("料理の価格(万G)", min_value=0.00, step=1.0, key="meal_cost")
     with col2: meal_num = st.number_input("飯数", min_value=0, step=1, key="meal_num")
-    with col3: cost = st.number_input("細胞の価格(万G)", min_value=0.0, step=0.1, key="cost")
-    with col4: price = st.number_input("核の価格(万G)", min_value=0.0, step=1.0, key="price")
+    with col3: cost = st.number_input("細胞の価格(万G)", min_value=0.0, step=0.01, key="cost")
+    with col4: price = st.number_input("核の価格(万G)", min_value=0.0, step=0.1, key="price")
 
     # -------- 相場の自動投入ボタン --------
     def _apply_market(kaku_item: str, saibou_item: str):
@@ -202,8 +424,8 @@ else:
         - st.session_state.meal_cost * (st.session_state.meal_num / 5)
     )
     profit = int(profit * 10000)
-    count = st.session_state.frag_45 + st.session_state.frag_75 + st.session_state.core + st.session_state.wipes
-
+    record_count(now)
+    count = st.session_state._last_total
 
     html = """
     <div style="display: flex; gap: 2rem;">
@@ -231,6 +453,11 @@ else:
     )
     st.markdown(html, unsafe_allow_html=True)
 
+
+    # カウント履歴の表示
+    render_count_logs(st.session_state.count_logs)
+
+
     st.markdown(
         "<div style='margin-top:1em;margin-bottom:0.3em;color:#ffcc00;'>⚠️ 入力したデータは、このボタンを押さないと保存されません。</div>",
         unsafe_allow_html=True
@@ -254,6 +481,7 @@ else:
         st.session_state.supabase.add_record(record)
         st.session_state.supabase.update_user_last_activity(selected_user)
         st.success("データを追加しました！")
+        st.session_state._flash_msg = ("success", "データを追加しました！")
         st.rerun()
 
     # 前回カウントを変更した際の時刻を表示
@@ -267,9 +495,16 @@ else:
     if current_count_inputs != {k: st.session_state.inputs.get(k, None) for k in current_count_inputs}:
         st.session_state.last_modified = now
         st.session_state.inputs.update(current_count_inputs)
-    if st.session_state.last_modified:
-        st.info(f"最後にカウントを入力した時間: {st.session_state.last_modified.strftime('%H:%M:%S')}")
+    # if st.session_state.last_modified:
+    #     st.info(f"最後にカウントを入力した時間: {st.session_state.last_modified.strftime('%H:%M:%S')}")
 
+
+    # カウンターと履歴のクリア
+    if st.button("カウントと履歴の表示をクリア", type="secondary"):
+        st.session_state._reset_counts = True
+        st.session_state.count_logs = []
+        # st.session_state._flash_msg = ("info", "カウントと履歴をクリアしました")
+        st.rerun()
 
     # ------------------ データ表示 ------------------
     st.divider()
@@ -282,7 +517,7 @@ else:
         months = sorted(df["month"].unique(), reverse=True)
         selected_month = st.selectbox("表示する月を選択", months + ["すべて表示"])
         filtered_df = df if selected_month == "すべて表示" else df[df["month"] == selected_month]
-        filtered_df = filtered_df.reset_index(drop=True)
+        filtered_df = filtered_df.sort_values("created_at", ascending=False).reset_index(drop=True)
         editable_df = filtered_df.drop(columns=["month"])
         editable_df["date"] = editable_df["date"].dt.date
         editable_df["profit"] = editable_df["profit"].apply(lambda x: f"{x:,}")
