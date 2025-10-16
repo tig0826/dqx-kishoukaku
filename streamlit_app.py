@@ -9,10 +9,12 @@ from pytz import timezone
 import uuid
 # from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timezone as dt_timezone, timedelta
+import base64, os
+
 
 st.set_page_config(
     page_title="輝晶核家計簿", 
-    page_icon="https://ドラクエ10.jp/pic5/kisyou3.jpg", 
+    page_icon="https://ドラクエ10.jp/pic5/kisyou3.jpg",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -136,42 +138,140 @@ def record_count(now):
         st.session_state._last_total = cur
 
 
+def _lerp(a, b, t):
+    return a + (b - a) * max(0.0, min(1.0, float(t)))
 
-def _lerp(a, b, t): return a + (b - a) * t
-def _hex(r,g,b): return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+def _hex(r,g,b):
+    return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+
+def _mix(c1, c2, t):
+    """#rrggbb 同士を t∈[0,1] でブレンド"""
+    c1 = c1.lstrip("#"); c2 = c2.lstrip("#")
+    r1,g1,b1 = int(c1[0:2],16), int(c1[2:4],16), int(c1[4:6],16)
+    r2,g2,b2 = int(c2[0:2],16), int(c2[2:4],16), int(c2[4:6],16)
+    return _hex(_lerp(r1,r2,t), _lerp(g1,g2,t), _lerp(b1,b2,t))
+
 def _color_by_minutes(mins: float) -> str:
+    """
+    1分以下 → 濃い緑（かなりいい）
+    2分以下 → 明るい緑（問題なし）
+    3分以下 → アンバー（ちょい遅い）
+    4分以下 → オレンジ（事故気味）
+    5分以下 → 赤（かなり遅い）
+    5分超   → 深赤（入力忘れ疑い）
+    """
     m = max(0.0, float(mins))
-    if m >= 5: return "#e74c3c"  # 赤
-    if m <= 2.5:
-        t = m / 2.5
-        r = _lerp(0x2e, 0xf1, t); g = _lerp(0xcc, 0xc4, t); b = _lerp(0x71, 0x0f, t)
-    else:
-        t = (m - 2.5) / 2.5
-        r = _lerp(0xf1, 0xe7, t); g = _lerp(0xc4, 0x4c, t); b = _lerp(0x0f, 0x3c, t)
-    return _hex(r,g,b)
+    GREEN_GOOD_DARK = "#16a34a"  # green-600
+    GREEN_OK_LIGHT  = "#4ade80"  # green-400
+    AMBER           = "#f59e0b"  # amber-500
+    ORANGE          = "#fb923c"  # orange-400
+    RED             = "#ef4444"  # red-500
+    DEEP_RED        = "#991b1b"  # red-900
+    if m <= 1:
+        t = m / 1.0
+        return _mix(GREEN_GOOD_DARK, GREEN_OK_LIGHT, t*0.2)
+    if m <= 2:
+        t = (m - 1.0) / 1.0
+        return _mix(GREEN_GOOD_DARK, GREEN_OK_LIGHT, t)
+    if m <= 3:
+        t = (m - 2.0) / 1.0
+        return _mix(GREEN_OK_LIGHT, AMBER, t)
+    if m <= 4:
+        t = (m - 3.0) / 1.0
+        return _mix(AMBER, ORANGE, t)
+    if m <= 5:
+        t = (m - 4.0) / 1.0
+        return _mix(ORANGE, RED, t)
+    # 5分超: 深赤（固定）
+    return DEEP_RED
 
-_KIND_STYLE = {
-    "欠片45": {"fill": "#22d3ee", "shape": "triangle"},  # シアン
-    "欠片75": {"fill": "#a78bfa", "shape": "diamond"},   # バイオレット
-    "核":   {"fill": "#f472b6", "shape": "circle"},    # ピンク
-    "全滅":  {"fill": "#94a3b8", "shape": "square"},    # スレートグレー
+
+
+ICON_PATHS = {
+    "欠片": "image/icons/kakera.png",
+    "核":   "image/icons/kaku.png",
+    "全滅": "image/icons/wipe.png",
 }
 
-def _marker_svg(x, y, size, kind, title_text):
-    stl = _KIND_STYLE.get(kind, {"fill":"#22d3ee", "shape":"circle"})
-    s = size
-    stroke = '#111827'  # ダークな縁取り（背景が暗い想定）。明るい背景なら "#ffffff" に
-    sw = 1.25
+_cache_data_uri = {}
+def _img_to_data_uri(path: str) -> str | None:
+    if not path or not os.path.exists(path):
+        return None
+    if path in _cache_data_uri:
+        return _cache_data_uri[path]
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    uri = f"data:image/png;base64,{b64}"
+    _cache_data_uri[path] = uri
+    return uri
 
-    if stl["shape"] == "triangle":
-        pts = f"{x},{y-s} {x-s*0.9},{y+s*0.8} {x+s*0.9},{y+s*0.8}"
-        return f'<polygon points="{pts}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></polygon>'
-    if stl["shape"] == "diamond":
-        pts = f"{x},{y-s} {x-s},{y} {x},{y+s} {x+s},{y}"
-        return f'<polygon points="{pts}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></polygon>'
-    if stl["shape"] == "square":
-        return f'<rect x="{x-s}" y="{y-s}" width="{2*s}" height="{2*s}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></rect>'
-    return f'<circle cx="{x}" cy="{y}" r="{s}" fill="{stl["fill"]}" stroke="{stroke}" stroke-width="{sw}"><title>{title_text}</title></circle>'
+_BADGE_STYLE = {
+    "欠片45": {"bg":"#22d3ee", "fg":"#0b1020", "label":"45"},
+    "欠片75": {"bg":"#a78bfa", "fg":"#20102b", "label":"75"},
+    "核":     {"bg":None,      "fg":None,      "label":None},
+    "全滅":   {"bg":None,      "fg":None,      "label":None},
+}
+
+def _marker_svg(x: float, y: float, size: float, kind: str, title_text: str) -> str:
+    """
+    マーカーを描画するSVGを返す
+    """
+    base_kind = "欠片" if kind in ("欠片45", "欠片75") else kind
+    img_uri = _img_to_data_uri(ICON_PATHS.get(base_kind, ""))
+    # アイコン画像
+    IMG_SCALE = 6
+    w = h = size * IMG_SCALE
+    x0 = x - w/2
+    y0 = y - h/2
+    plate = (
+        f'<rect x="{x0}" y="{y0}" width="{w}" height="{h}" '
+        f'rx="{size*0.45}" fill="#0b0f1a" fill-opacity="0.55" />'
+    )
+    if img_uri:
+        image = f'<image href="{img_uri}" x="{x0}" y="{y0}" width="{w}" height="{h}" preserveAspectRatio="xMidYMid meet" />'
+    else:
+        image = f'<circle cx="{x}" cy="{y}" r="{size*1.1}" fill="#475569" />'
+    bs = _BADGE_STYLE.get(kind, {})
+    badge_svg = ""
+    if bs.get("label"):
+        badge_bg = bs["bg"]; badge_fg = bs["fg"]; label = bs["label"]
+
+        # バッジサイズ
+        r  = size * 1.5
+        bh = r * 1.05
+        bw = r * 2.15
+        # 右下に配置
+        bx = x0 + w - bw - r*0.25
+        by = y0 + h - bh - r*0.20
+        rx = bh / 2 # 楕円の縦半径
+
+        stroke_w = max(1.0, size * 0.16)
+        badge_shadow = (
+            f'<rect x="{bx+1.2}" y="{by+1.2}" width="{bw}" height="{bh}" '
+            f'rx="{rx}" fill="#000" fill-opacity="0.35"/>'
+        )
+        badge_body = (
+            f'<rect x="{bx}" y="{by}" width="{bw}" height="{bh}" rx="{rx}" '
+            f'fill="{badge_bg}" stroke="rgba(255,255,255,0.35)" stroke-width="{stroke_w}"/>'
+        )
+        tx = bx + bw/2
+        ty = by + bh*0.70
+        font_size = bh * 0.80
+        text_outline = (
+            f'<text x="{tx}" y="{ty}" text-anchor="middle" '
+            f'font-size="{font_size}" font-weight="900" '
+            f'stroke="#000" stroke-width="{max(0.8, stroke_w*0.9)}" '
+            f'fill="none" paint-order="stroke fill" '
+            f'font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial">{label}</text>'
+        )
+        text_fill = (
+            f'<text x="{tx}" y="{ty}" text-anchor="middle" '
+            f'font-size="{font_size}" font-weight="900" '
+            f'fill="{badge_fg}" '
+            f'font-family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial">{label}</text>'
+        )
+        badge_svg = badge_shadow + badge_body + text_outline + text_fill
+    return f'<g><title>{title_text}</title>{plate}{image}{badge_svg}</g>'
 
 def render_count_logs(logs, min_span_min=5, warn_minutes=5, title="⏱ カウント履歴"):
     if not logs or not isinstance(logs, list) or not all(isinstance(x, dict) and "ts" in x for x in logs):
@@ -189,40 +289,32 @@ def render_count_logs(logs, min_span_min=5, warn_minutes=5, title="⏱ カウン
     df = df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
     if df.empty:
         st.subheader(title); st.caption("有効なタイムスタンプがありません。"); return
-
     t0 = df["ts"].iloc[0]
     tzinfo = df["ts"].dt.tz  # tzinfo または None（Series ではない）
     now = pd.Timestamp.now(tz=tzinfo) if tzinfo is not None else pd.Timestamp.now()
-
     df["min_from_start"] = (df["ts"] - t0).dt.total_seconds() / 60.0
     # 次の入力までの区間（最後は now まで）
     next_ts = list(df["ts"].iloc[1:]) + [now]
     df["delta_min"] = (pd.Series(next_ts, dtype="datetime64[ns, UTC]" if tzinfo is not None else "datetime64[ns]") - df["ts"]).dt.total_seconds() / 60.0
     df["delta_min"] = df["delta_min"].clip(lower=0)
-
     total_span = max(float(min_span_min), float(df["min_from_start"].iloc[-1] + df["delta_min"].iloc[-1]))
-
     # ---- SVG パラメータ ----
-    W, H = 2000, 60
+    W, H = 2000, 70
     PAD_L, PAD_R = 48, 12
     Y, BAR_H, MARK_R = H/2, 8, 5
     def sx(mins): return PAD_L + (W - PAD_L - PAD_R) * (mins / total_span)
-
     # 目盛り
     ticks = []
     for m in range(0, int(math.ceil(total_span)) + 1):
         x = sx(m)
         is_major = m % 5 == 0
-        h = 12 if is_major else 6  # 長めに
+        h = 12 if is_major else 6
         sw = 2 if is_major else 1.2
-        col = "#f3f4f6" if is_major else "#6b7280"  # 明度を上げて視認性UP
-
+        col = "#f3f4f6" if is_major else "#6b7280"  # 明度を上げる
         # 目盛り線
         ticks.append(
             f'<line x1="{x}" y1="{Y+BAR_H+10}" x2="{x}" y2="{Y+BAR_H+10+h}" stroke="{col}" stroke-width="{sw}" />'
         )
-
-        # 5分ごとの数字（太字・大きめ）
         if is_major:
             ticks.append(
                 f'<text x="{x}" y="{Y+BAR_H+35}" fill="#f9fafb" font-size="18" font-weight="700" text-anchor="middle">{m}</text>'
@@ -232,7 +324,6 @@ def render_count_logs(logs, min_span_min=5, warn_minutes=5, title="⏱ カウン
     axis_label = (
         f'<text x="{PAD_L-36}" y="{Y+BAR_H+35}" fill="#e5e7eb" font-size="17" font-weight="600">分</text>'
     )
-
     # 区間色
     segs = []
     for i in range(len(df)):
@@ -244,20 +335,44 @@ def render_count_logs(logs, min_span_min=5, warn_minutes=5, title="⏱ カウン
         segs.append(
             f'<rect x="{x0}" y="{Y-BAR_H/2}" width="{w}" height="{BAR_H}" fill="{col}" fill-opacity="{BAR_OPACITY}" />'
         )
-
     # マーカー
     marks = []
     for i, r in df.iterrows():
         x = sx(r["min_from_start"]); y = Y
         info = f'{r["ts"].strftime("%H:%M:%S")}｜先頭から{r["min_from_start"]:.1f}分｜合計{int(r["合計"])}｜kind:{r.get("kind","-")}'
         marks.append(_marker_svg(x, y, MARK_R, r.get("kind",""), info))
-
     # レジェンド
-    legend_x = PAD_L; legend_y = 14; lg = []
-    for k, stl in _KIND_STYLE.items():
-        lg.append(f'<rect x="{legend_x}" y="{legend_y-8}" width="10" height="10" fill="{stl["fill"]}" rx="2"/>')
-        lg.append(f'<text x="{legend_x+14}" y="{legend_y}" fill="#d1d5db" font-size="11">{k}</text>')
-        legend_x += 70
+    legend_defs = [
+        ("欠片45", "欠片45"),
+        ("欠片75", "欠片75"),
+        ("核",     "核"),
+        ("全滅",   "全滅"),
+    ]
+    legend_x = PAD_L
+    legend_y = 12
+    lg = []
+    for label, kind_name in legend_defs:
+        # アイコン
+        base_kind = "欠片" if kind_name in ("欠片45","欠片75") else kind_name
+        uri = _img_to_data_uri(ICON_PATHS.get(base_kind, ""))
+        w = h = 14
+        if uri:
+            lg.append(f'<image href="{uri}" x="{legend_x}" y="{legend_y-10}" width="{w}" height="{h}" />')
+        else:
+            lg.append(f'<rect x="{legend_x}" y="{legend_y-10}" width="{w}" height="{h}" rx="3" fill="#475569" />')
+
+        # バッジ
+        bs = _BADGE_STYLE.get(kind_name, {})
+        if bs.get("label"):
+            r = 5.2
+            bx = legend_x + w - r*0.6
+            by = legend_y - 10 + h - r*0.6
+            lg.append(f'<circle cx="{bx}" cy="{by}" r="{r}" fill="{bs["bg"]}" />')
+            lg.append(f'<text x="{bx}" y="{by+1.6}" text-anchor="middle" font-size="7" font-weight="700" fill="{bs["fg"]}">{bs["label"]}</text>')
+        # ラベル文字
+        lg.append(f'<text x="{legend_x + 20}" y="{legend_y+1}" fill="#d1d5db" font-size="12">{label}</text>')
+        legend_x += 90
+
 
     svg = f'''
 <svg viewBox="0 0 {W} {H+28}" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
@@ -281,10 +396,10 @@ def render_count_logs(logs, min_span_min=5, warn_minutes=5, title="⏱ カウン
             df
         ], ignore_index=True)
 
-    # 合計経過時間（start → 最終イベント）
+    # 合計経過時間
     total_elapsed_min = (df["ts"].iloc[-1] - df["ts"].iloc[0]).total_seconds() / 60
 
-    # 平均時間（start→最初のカウント も含む連続差分の平均）
+    # 平均時間
     intervals_min = df["ts"].diff().iloc[1:].dt.total_seconds().div(60)
     avg_interval_min = float(intervals_min.mean()) if len(intervals_min) else 0.0
 
